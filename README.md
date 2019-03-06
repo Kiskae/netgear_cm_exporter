@@ -7,6 +7,10 @@ Prometheus exporter for Netgear cable modems. This has been developed against a 
 is likely to work with other modems in the CMxxxx family. If you are able to run this successfully
 on another Netgear cable modem model, please see the contributing section below.
 
+## Modifications
+
+Support for the Ziggo Ubee UVW320b
+
 ## Supported Devices
 
 These Netgear models have been tested and are officially supported:
