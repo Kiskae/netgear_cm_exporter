@@ -49,7 +49,7 @@ type Exporter struct {
 
 	// Ziggo metrics.
 	reportedTimeouts *prometheus.Desc
-	modemUptime      prometheus.Gauge
+	modemUptime      *prometheus.Desc
 }
 
 // NewExporter returns an instance of Exporter configured with the modem's
@@ -117,11 +117,11 @@ func NewExporter(addr, username, password string) *Exporter {
 			"Timeouts as reported by Ziggo",
 			[]string{"name"}, nil,
 		),
-		modemUptime: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "uptime_seconds",
-			Help:      "Reported uptime of the modem in seconds.",
-		}),
+		modemUptime: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "", "uptime_seconds"),
+			"Reported uptime of the modem in seconds.",
+			[]string{"firmware"}, nil,
+		),
 	}
 }
 
@@ -140,7 +140,12 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	ch <- e.usChannelSymbolRate
 	// Ziggo metrics.
 	ch <- e.reportedTimeouts
-	ch <- e.modemUptime.Desc()
+	ch <- e.modemUptime
+}
+
+type UptimeInfo struct {
+	uptime   time.Duration
+	firmware string
 }
 
 func (e *Exporter) CollectDocsis(ch chan<- prometheus.Metric, dom *goquery.Selection) {
@@ -276,7 +281,7 @@ func (e *Exporter) CollectDocsis(ch chan<- prometheus.Metric, dom *goquery.Selec
 	})
 }
 
-func (e *Exporter) CollectStatus(ch chan<- prometheus.Metric, dom *goquery.Selection) {
+func (e *Exporter) CollectStatus(out *UptimeInfo, dom *goquery.Selection) {
 	// #main_page > div.table_data > table > tbody > tr:nth-child(2) > td:nth-child(2)
 	// <td>1 days 02h:22m:53s</td>
 	// <td>0 days 00h:00m:36s</td>
@@ -297,11 +302,16 @@ func (e *Exporter) CollectStatus(ch chan<- prometheus.Metric, dom *goquery.Selec
 			&seconds,
 		)
 
-		var uptime = (time.Duration(days*24+int(hours)) * time.Hour) +
+		out.uptime = (time.Duration(days*24+int(hours)) * time.Hour) +
 			(time.Duration(minutes) * time.Minute) +
 			(time.Duration(seconds) * time.Second)
+	})
+}
 
-		e.modemUptime.Set(uptime.Seconds())
+func (e *Exporter) CollectFirmware(out *UptimeInfo, dom *goquery.Selection) {
+	// #main_page > div.table_data > table > tbody > tr:nth-child(3) > td:nth-child(2)
+	dom.Find("table tr:nth-child(3) > td:nth-child(2)").Each(func(_ int, sel *goquery.Selection) {
+		out.firmware = strings.TrimSpace(sel.Text())
 	})
 }
 
@@ -333,6 +343,8 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	c := colly.NewCollector()
 	c.RedirectHandler = ZiggoLoginHandler()
 
+	uptimeInfo := &UptimeInfo{}
+
 	// OnError callback counts any errors that occur during scraping.
 	c.OnError(func(r *colly.Response, err error) {
 		log.Printf("scrape failed: %d %s", r.StatusCode, http.StatusText(r.StatusCode))
@@ -347,7 +359,9 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			case "Docsis":
 				e.CollectDocsis(ch, mainPage)
 			case "Status":
-				e.CollectStatus(ch, mainPage)
+				e.CollectStatus(uptimeInfo, mainPage)
+			case "Firmware":
+				e.CollectFirmware(uptimeInfo, mainPage)
 			}
 		})
 	})
@@ -358,9 +372,16 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	if err == nil {
 		c.Visit(fmt.Sprintf("http://%s/BasicCmState.asp", e.host))
 		c.Visit(fmt.Sprintf("http://%s/BasicStatus.asp", e.host))
+		c.Visit(fmt.Sprintf("http://%s/BasicFirmware.asp", e.host))
+
+		ch <- prometheus.MustNewConstMetric(
+			e.modemUptime,
+			prometheus.GaugeValue,
+			float64(uptimeInfo.uptime.Seconds()),
+			uptimeInfo.firmware,
+		)
 	}
 
-	e.modemUptime.Collect(ch)
 	e.totalScrapes.Collect(ch)
 	e.scrapeErrors.Collect(ch)
 	e.mu.Unlock()
